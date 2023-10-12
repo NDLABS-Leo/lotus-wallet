@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
 	actorstypes "github.com/filecoin-project/go-state-types/actors"
 	"github.com/filecoin-project/go-state-types/builtin"
@@ -21,7 +20,6 @@ import (
 	"github.com/filecoin-project/lotus/metrics/proxy"
 	builtin0 "github.com/filecoin-project/specs-actors/actors/builtin"
 	multisig0 "github.com/filecoin-project/specs-actors/actors/builtin/multisig"
-	"github.com/skip2/go-qrcode"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -30,15 +28,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gbrlsnchs/jwt/v3"
 	"github.com/gorilla/mux"
 	logging "github.com/ipfs/go-log/v2"
-	"github.com/urfave/cli/v2"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 	"golang.org/x/xerrors"
 
-	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-jsonrpc/auth"
 
 	"github.com/filecoin-project/lotus/api"
@@ -67,6 +62,7 @@ func main() {
 	local := []*cli.Command{
 		runCmd,
 		walletNew,
+		walletExport,
 		getApiKeyCmd,
 		walletSign,
 		getWalletDefault,
