@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/filecoin-project/go-address"
-	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-state-types/abi"
 	actorstypes "github.com/filecoin-project/go-state-types/actors"
 	"github.com/filecoin-project/go-state-types/builtin"
@@ -22,9 +21,7 @@ import (
 	"github.com/filecoin-project/lotus/metrics/proxy"
 	builtin0 "github.com/filecoin-project/specs-actors/actors/builtin"
 	multisig0 "github.com/filecoin-project/specs-actors/actors/builtin/multisig"
-	"github.com/gbrlsnchs/jwt/v3"
 	"github.com/skip2/go-qrcode"
-	"github.com/urfave/cli/v2"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -33,12 +30,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gbrlsnchs/jwt/v3"
 	"github.com/gorilla/mux"
 	logging "github.com/ipfs/go-log/v2"
+	"github.com/urfave/cli/v2"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 	"golang.org/x/xerrors"
 
+	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-jsonrpc/auth"
 
 	"github.com/filecoin-project/lotus/api"
@@ -66,8 +66,6 @@ func main() {
 
 	local := []*cli.Command{
 		runCmd,
-		walletNew,
-		walletExport,
 		getApiKeyCmd,
 		walletSign,
 		getWalletDefault,
@@ -212,47 +210,6 @@ var walletNew = &cli.Command{
 
 		fmt.Println(nk.String())
 
-		return nil
-	},
-}
-
-var walletExport = &cli.Command{
-	Name:      "export",
-	Usage:     "export keys ",
-	ArgsUsage: "[address]",
-	Action: func(cctx *cli.Context) error {
-
-		log.Info("Starting wallet export ")
-
-		ctx := context.Background()
-
-		lr, ks, err := openRepo(cctx)
-		if err != nil {
-			return err
-		}
-		defer lr.Close() // nolint
-
-		api, err := wallet.NewWallet(ks)
-		if err != nil {
-			return err
-		}
-
-		addr, err := address.NewFromString(cctx.Args().First())
-		if err != nil {
-			return err
-		}
-
-		ki, err := api.WalletExport(ctx, addr)
-		if err != nil {
-			return err
-		}
-
-		b, err := json.Marshal(ki)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(hex.EncodeToString(b))
 		return nil
 	},
 }
@@ -996,9 +953,16 @@ var walletSign = &cli.Command{
 
 			d := abi.ChainEpoch(parsed)
 
+			var required uint64
+			if ws.Required != 0 {
+				required = ws.Required
+			} else {
+				required = lenAddrs
+			}
+
 			msigParams := &multisig9.ConstructorParams{
 				Signers:               ws.Addrs,
-				NumApprovalsThreshold: lenAddrs,
+				NumApprovalsThreshold: required,
 				UnlockDuration:        d,
 				StartEpoch:            0,
 			}
@@ -1078,7 +1042,7 @@ var walletSign = &cli.Command{
 			msgResp.Message.From = newFromString
 			msgResp.Message.To = newToString
 
-			p, err := hex.DecodeString(ws.params)
+			p, err := hex.DecodeString(ws.Params)
 
 			if err != nil {
 				return err
@@ -1617,7 +1581,7 @@ type CreateMultiSigReq struct {
 	GasPremium string
 	Method     int
 	Addrs      []address.Address
-	Required   int64
+	Required   uint64
 	Duration   string
 }
 
@@ -1630,7 +1594,7 @@ type CreateMsigProposeReq struct {
 	GasLimit   int64
 	GasPremium string
 	Method     uint64
-	params     string
+	Params     string
 	Target     string
 }
 
