@@ -16,37 +16,28 @@ import (
 	miner2 "github.com/filecoin-project/go-state-types/builtin/v9/miner"
 	multisig9 "github.com/filecoin-project/go-state-types/builtin/v9/multisig"
 	"github.com/filecoin-project/go-state-types/manifest"
-	"github.com/filecoin-project/lotus/api/v0api"
 	"github.com/filecoin-project/lotus/chain/actors"
-	"github.com/filecoin-project/lotus/metrics/proxy"
 	builtin0 "github.com/filecoin-project/specs-actors/actors/builtin"
 	multisig0 "github.com/filecoin-project/specs-actors/actors/builtin/multisig"
-	"github.com/skip2/go-qrcode"
-	"io/ioutil"
-	"net"
-	"net/http"
-	"os"
-	"strconv"
-	"strings"
-	"time"
-
 	"github.com/gbrlsnchs/jwt/v3"
-	"github.com/gorilla/mux"
+	"github.com/google/uuid"
 	logging "github.com/ipfs/go-log/v2"
+	"github.com/skip2/go-qrcode"
 	"github.com/urfave/cli/v2"
 	"go.opencensus.io/stats/view"
-	"go.opencensus.io/tag"
 	"golang.org/x/xerrors"
+	"io/ioutil"
+	"os"
+	"reflect"
+	"strconv"
+	"strings"
 
-	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-jsonrpc/auth"
 
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/build"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/chain/wallet"
-	ledgerwallet "github.com/filecoin-project/lotus/chain/wallet/ledger"
-	lcli "github.com/filecoin-project/lotus/cli"
 	"github.com/filecoin-project/lotus/lib/lotuslog"
 	"github.com/filecoin-project/lotus/metrics"
 	"github.com/filecoin-project/lotus/node/modules"
@@ -65,13 +56,13 @@ func main() {
 	lotuslog.SetupLogLevels()
 
 	local := []*cli.Command{
-		runCmd,
 		getApiKeyCmd,
+		walletNew,
 		walletSign,
 		getWalletDefault,
 		walletList,
-		walletSend,
 		walletImport,
+		walletExport,
 	}
 
 	app := &cli.App{
@@ -143,9 +134,8 @@ var getApiKeyCmd = &cli.Command{
 }
 
 var walletList = &cli.Command{
-	Name:      "list",
-	Usage:     "./lotus-wallet list ",
-	ArgsUsage: "<nil>",
+	Name:  "list",
+	Usage: "List wallet address",
 	Action: func(cctx *cli.Context) error {
 
 		log.Info("Starting lotus list ")
@@ -179,7 +169,7 @@ var walletList = &cli.Command{
 
 var walletNew = &cli.Command{
 	Name:      "new",
-	Usage:     "./lotus-wallet new ",
+	Usage:     "Generate a new key of the given type",
 	ArgsUsage: "[bls|secp256k1 (default secp256k1)]",
 	Action: func(cctx *cli.Context) error {
 
@@ -214,43 +204,10 @@ var walletNew = &cli.Command{
 	},
 }
 
-var walletHexString = &cli.Command{
-	Name:      "hexToString",
-	Usage:     "./lotus-wallet hexToString ",
-	ArgsUsage: "params to hexToString",
-	Action: func(cctx *cli.Context) error {
-
-		log.Info("Starting lotus hexToString ")
-
-		fdata, err := ioutil.ReadFile(cctx.Args().Get(0))
-		if err != nil {
-			return err
-		}
-
-		var ws map[string]interface{}
-
-		if err := json.Unmarshal(fdata, &ws); err != nil {
-			return err
-		}
-
-		marshal, err := json.Marshal(ws)
-
-		if err != nil {
-			return err
-		}
-
-		str := hex.EncodeToString(marshal)
-
-		fmt.Printf("Sign result: %v\n", str)
-
-		return nil
-	},
-}
-
 var walletSign = &cli.Command{
 	Name:      "sign",
-	Usage:     "walletSign",
-	ArgsUsage: "<nil>",
+	Usage:     "Generate a signature from a json file",
+	ArgsUsage: "[method] [jsonfile]",
 	Action: func(cctx *cli.Context) error {
 
 		lr, ks, err := openRepo(cctx)
@@ -288,6 +245,23 @@ var walletSign = &cli.Command{
 				return err
 			}
 
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
+			}
+
 			//组装message
 			msgResp := new(types.SignedMessage)
 
@@ -310,6 +284,10 @@ var walletSign = &cli.Command{
 				return fmt.Errorf("failed to parse value amount: %w", err)
 			}
 			msgResp.Message.Value = abi.TokenAmount(value)
+
+			if ws.Method != 0 {
+				return fmt.Errorf("Input method is incorrect.")
+			}
 
 			msgResp.Message.Method = abi.MethodNum(0)
 
@@ -380,15 +358,36 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
-		} else if first == "6" {
+		} else if first == "16" {
 			log.Info("Starting  Withdraw sign")
 
 			var ws WithdrawReq
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -493,6 +492,10 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
 		} else if first == "23" {
@@ -503,6 +506,23 @@ var walletSign = &cli.Command{
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -609,6 +629,10 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
 		} else if first == "3" {
@@ -619,6 +643,23 @@ var walletSign = &cli.Command{
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -730,6 +771,10 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
 		} else if first == "30" {
@@ -740,6 +785,23 @@ var walletSign = &cli.Command{
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -861,6 +923,10 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
 		} else if first == "2" {
@@ -871,6 +937,23 @@ var walletSign = &cli.Command{
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -1014,6 +1097,10 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
 		} else if first == "12" {
@@ -1024,6 +1111,23 @@ var walletSign = &cli.Command{
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -1050,7 +1154,12 @@ var walletSign = &cli.Command{
 
 			target, err := address.NewFromString(ws.Target)
 
-			amt, err := strconv.ParseUint(ws.Value, 0, 64)
+			//amt, err := strconv.ParseUint(ws.Value, 0, 64)
+
+			amt, err := types.ParseFIL(ws.Amt)
+			if err != nil {
+				return fmt.Errorf("failed to parse value amount: %w", err)
+			}
 
 			if err != nil {
 				return err
@@ -1058,7 +1167,7 @@ var walletSign = &cli.Command{
 
 			enc, actErr := actors.SerializeParams(&multisig0.ProposeParams{
 				To:     target,
-				Value:  types.NewInt(amt),
+				Value:  abi.TokenAmount(amt),
 				Method: abi.MethodNum(ws.Method),
 				Params: p,
 			})
@@ -1146,6 +1255,10 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
 		} else if first == "13" {
@@ -1156,6 +1269,23 @@ var walletSign = &cli.Command{
 
 			if err := json.Unmarshal(fdata, &ws); err != nil {
 				return err
+			}
+
+			t := reflect.TypeOf(ws)
+			v := reflect.ValueOf(ws)
+			for k := 0; k < t.NumField(); k++ {
+				fmt.Printf("Please confirm that the fields are correct %s -- %v \n", t.Field(k).Name, v.Field(k).Interface())
+				rd := bufio.NewReader(os.Stdin)
+				line, _, err := rd.ReadLine()
+
+				if err != nil {
+					return fmt.Errorf("rd readLine err : %v", err)
+					break
+				}
+
+				if string(line) == "n" || string(line) == "N" {
+					break
+				}
 			}
 
 			//组装message
@@ -1261,153 +1391,39 @@ var walletSign = &cli.Command{
 
 			serialize, err := msgResp.Serialize()
 
+			if err != nil {
+				return xerrors.Errorf("msg to serialize: %w", err)
+			}
+
 			str = hex.EncodeToString(serialize)
 
+		} else {
+			return fmt.Errorf("Unknown method, please check you arguments")
 		}
 
 		path := lr.Path()
 
-		now := time.Now().Unix()
+		u1, err := uuid.NewRandom()
 
-		string := strconv.FormatInt(now, 10)
+		if err != nil {
+			return fmt.Errorf("The uuid is generated incorrectly %w", err)
+		}
 
-		image := path + "/offline_qrcode_" + string + ".png"
+		//now := time.Now().Unix()
+		//
+		//string := strconv.FormatInt(now, 10)
 
-		qrcode.WriteFile(str, qrcode.Medium, 256, image)
+		image := path + "/offline_qrcode_" + u1.String() + ".png"
+
+		err = qrcode.WriteFile(str, qrcode.Medium, 256, image)
+
+		if err != nil {
+			return fmt.Errorf("qrcode write file  %w", err)
+		}
 
 		fmt.Printf("Qrcode: %v\n", image)
 
 		fmt.Printf("Sign result: %v\n", str)
-
-		return nil
-	},
-}
-
-var walletSend = &cli.Command{
-	Name:      "send",
-	Usage:     "walletSend",
-	ArgsUsage: "<nil>",
-	Action: func(cctx *cli.Context) error {
-
-		//log.Info("Starting lotus wallet sign")
-		//
-		//ctx := context.Background()
-		//
-		//api, closer, err := lcli.GetFullNodeAPIV1(cctx)
-		//if err != nil {
-		//	return err
-		//}
-		//defer closer()
-		//
-		//
-		//
-		//fdata, err := ioutil.ReadFile(cctx.Args().First())
-		//if err != nil {
-		//	return err
-		//}
-		//
-		//var ws WalletSendReq
-		//
-		//msg := new(types.SignedMessage)
-		//
-		//msg.ToStorageBlock()
-		//
-		//
-		//
-		//if err := json.Unmarshal(fdata, &ws); err != nil {
-		//	return err
-		//}
-		//
-		//marshal, err := json.Marshal(ws)
-		//
-		//if err != nil {
-		//	return err
-		//}
-		//
-		//fmt.Printf("walletSendReq is %v ",string(marshal))
-		//
-		//
-		//
-		//fromString, err := address.NewFromString(ws.Address)
-		//
-		//if err != nil {
-		//	return fmt.Errorf("fromString must params is null")
-		//}
-		//
-		//
-		//
-		//newFromString, err := address.NewFromString(ws.From)
-		//
-		//if err != nil {
-		//	return fmt.Errorf("newFromString not found 1")
-		//}
-		//newToString, err := address.NewFromString(ws.To)
-		//
-		//if err != nil {
-		//	return fmt.Errorf("newFromString not found 2")
-		//}
-		//msg.Message.From = newFromString
-		//msg.Message.To = newToString
-		//
-		//fmt.Printf("value is %v ",ws.Value)
-		//value, err := types.ParseFIL(ws.Value)
-		//if err != nil {
-		//	return fmt.Errorf("failed to parse value amount: %w", err)
-		//}
-		//msg.Message.Value = abi.TokenAmount(value)
-		//msg.Message.Method = abi.MethodNum(0)
-		//
-		//sigBytes, err := hex.DecodeString(ws.Signature)
-		//
-		//if err != nil {
-		//	return err
-		//}
-		//
-		//var sig crypto.Signature
-		//if err := sig.UnmarshalBinary(sigBytes); err != nil {
-		//	return err
-		//}
-		//nonce, err := api.MpoolGetNonce(ctx, fromString)
-		//
-		//if err != nil {
-		//	return fmt.Errorf("failed to get nonce: %w", err)
-		//}
-		//
-		//
-		//msg.Message.Nonce = nonce+1
-		//
-		//
-		//fmt.Printf("sig.Type is %v ",sig.Type)
-		//fmt.Printf("sig.Data is %v ",string(sig.Data))
-		//
-		//
-		//msg.Signature = sig
-		//
-		//gasedMsg, err := api.GasEstimateMessageGas(ctx, &msg.Message, nil, types.EmptyTSK)
-		//if err != nil {
-		//	return fmt.Errorf("estimating gas: %w", err)
-		//}
-		//
-		//msg.Message.GasFeeCap = gasedMsg.GasFeeCap
-		//msg.Message.GasLimit = gasedMsg.GasLimit
-		//msg.Message.GasPremium = gasedMsg.GasPremium
-		////组装message 计算gas
-		//if ws.Feecap != ""{
-		//	val, err := types.ParseFIL(ws.Feecap)
-		//	if err != nil {
-		//		return fmt.Errorf("failed to parse feecap amount: %w", err)
-		//	}
-		//	msg.Message.GasFeeCap = abi.TokenAmount(val)
-		//
-		//
-		//}
-		//
-		//mid, err := api.MpoolPush(ctx, msg)
-		//if err != nil {
-		//	return fmt.Errorf("failed to MpoolPush: %w", err)
-		//}
-		//
-		//fmt.Println(mid)
 
 		return nil
 	},
@@ -1518,6 +1534,45 @@ var walletImport = &cli.Command{
 	},
 }
 
+var walletExport = &cli.Command{
+	Name:      "export",
+	Usage:     "export keys",
+	ArgsUsage: "[address]",
+	Action: func(cctx *cli.Context) error {
+
+		ctx := context.Background()
+
+		lr, ks, err := openRepo(cctx)
+		if err != nil {
+			return err
+		}
+		defer lr.Close() // nolint
+
+		api, err := wallet.NewWallet(ks)
+		if err != nil {
+			return err
+		}
+
+		addr, err := address.NewFromString(cctx.Args().First())
+		if err != nil {
+			return err
+		}
+
+		ki, err := api.WalletExport(ctx, addr)
+		if err != nil {
+			return err
+		}
+
+		b, err := json.Marshal(ki)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(hex.EncodeToString(b))
+		return nil
+	},
+}
+
 type WalletSignReq struct {
 	Type string
 	Data string
@@ -1590,6 +1645,7 @@ type CreateMsigProposeReq struct {
 	To         string
 	Nonce      uint64
 	Value      string
+	Amt        string
 	GasFeeCap  string
 	GasLimit   int64
 	GasPremium string
@@ -1657,158 +1713,13 @@ var getWalletDefault = &cli.Command{
 
 		getDefault, err := lw.GetDefault()
 
+		if err != nil {
+			return err
+		}
+
 		fmt.Println(getDefault)
 
 		return nil
-	},
-}
-
-var runCmd = &cli.Command{
-	Name:  "run",
-	Usage: "Start lotus wallet",
-	Flags: []cli.Flag{
-		&cli.StringFlag{
-			Name:  "listen",
-			Usage: "host address and port the wallet api will listen on",
-			Value: "0.0.0.0:1777",
-		},
-		&cli.BoolFlag{
-			Name:  "ledger",
-			Usage: "use a ledger device instead of an on-disk wallet",
-		},
-		&cli.BoolFlag{
-			Name:  "interactive",
-			Usage: "prompt before performing actions (DO NOT USE FOR MINER WORKER ADDRESS)",
-		},
-		&cli.BoolFlag{
-			Name:  "offline",
-			Usage: "don't query chain state in interactive mode",
-		},
-		&cli.BoolFlag{
-			Name:   "disable-auth",
-			Usage:  "(insecure) disable api auth",
-			Hidden: true,
-		},
-	},
-	Description: "For setup instructions see 'lotus-wallet --help'",
-	Action: func(cctx *cli.Context) error {
-		log.Info("Starting lotus wallet")
-
-		ctx := lcli.ReqContext(cctx)
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		// Register all metric views
-		if err := view.Register(
-			metrics.DefaultViews...,
-		); err != nil {
-			log.Fatalf("Cannot register the view: %v", err)
-		}
-
-		lr, ks, err := openRepo(cctx)
-		if err != nil {
-			return err
-		}
-		defer lr.Close() // nolint
-
-		lw, err := wallet.NewWallet(ks)
-		if err != nil {
-			return err
-		}
-
-		var w api.Wallet = lw
-		if cctx.Bool("ledger") {
-			ds, err := lr.Datastore(context.Background(), "/metadata")
-			if err != nil {
-				return err
-			}
-
-			w = wallet.MultiWallet{
-				Local:  lw,
-				Ledger: ledgerwallet.NewWallet(ds),
-			}
-		}
-
-		address := cctx.String("listen")
-		mux := mux.NewRouter()
-
-		log.Info("Setting up API endpoint at " + address)
-
-		if cctx.Bool("interactive") {
-			var ag func() (v0api.FullNode, jsonrpc.ClientCloser, error)
-
-			if !cctx.Bool("offline") {
-				ag = func() (v0api.FullNode, jsonrpc.ClientCloser, error) {
-					return lcli.GetFullNodeAPI(cctx)
-				}
-			}
-
-			w = &InteractiveWallet{
-				under:     w,
-				apiGetter: ag,
-			}
-		} else {
-			w = &LoggedWallet{under: w}
-		}
-
-		rpcApi := proxy.MetricedWalletAPI(w)
-		if !cctx.Bool("disable-auth") {
-			rpcApi = api.PermissionedWalletAPI(rpcApi)
-		}
-
-		rpcServer := jsonrpc.NewServer()
-		rpcServer.Register("Filecoin", rpcApi)
-
-		mux.Handle("/rpc/v0", rpcServer)
-		mux.PathPrefix("/").Handler(http.DefaultServeMux) // pprof
-
-		var handler http.Handler = mux
-
-		if !cctx.Bool("disable-auth") {
-			authKey, err := modules.APISecret(ks, lr)
-			if err != nil {
-				return xerrors.Errorf("setting up api secret: %w", err)
-			}
-
-			authVerify := func(ctx context.Context, token string) ([]auth.Permission, error) {
-				var payload jwtPayload
-				if _, err := jwt.Verify([]byte(token), (*jwt.HMACSHA)(authKey), &payload); err != nil {
-					return nil, xerrors.Errorf("JWT Verification failed: %w", err)
-				}
-
-				return payload.Allow, nil
-			}
-
-			log.Info("API auth enabled, use 'lotus-wallet get-api-key' to get API key")
-			handler = &auth.Handler{
-				Verify: authVerify,
-				Next:   mux.ServeHTTP,
-			}
-		}
-
-		srv := &http.Server{
-			Handler: handler,
-			BaseContext: func(listener net.Listener) context.Context {
-				ctx, _ := tag.New(context.Background(), tag.Upsert(metrics.APIInterface, "lotus-wallet"))
-				return ctx
-			},
-		}
-
-		go func() {
-			<-ctx.Done()
-			log.Warn("Shutting down...")
-			if err := srv.Shutdown(context.TODO()); err != nil {
-				log.Errorf("shutting down RPC server failed: %s", err)
-			}
-			log.Warn("Graceful shutdown successful")
-		}()
-
-		nl, err := net.Listen("tcp", address)
-		if err != nil {
-			return err
-		}
-
-		return srv.Serve(nl)
 	},
 }
 
